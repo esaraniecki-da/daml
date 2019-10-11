@@ -140,7 +140,7 @@ noassistantTests damlDir = testGroup "no assistant"
 
 packagingTests :: TestTree
 packagingTests = testGroup "packaging"
-    [ testCaseSteps "Build package with dependency" $ \step -> withTempDir $ \tmpDir -> do
+    ([ testCaseSteps "Build package with dependency" $ \step -> withTempDir $ \tmpDir -> do
         let projectA = tmpDir </> "a"
         let projectB = tmpDir </> "b"
         let aDar = projectA </> ".daml" </> "dist" </> "a-1.0.dar"
@@ -395,7 +395,10 @@ packagingTests = testGroup "packaging"
             , "dependencies: [daml-prim, daml-stdlib]"
             ]
         withCurrentDirectory projDir $ callCommandQuiet "daml build"
-    , testCase "Dalf imports" $ withTempDir $ \projDir -> do
+
+    ] <> do
+      withArchiveChoice <- [False,True] -- run two variations of the test
+      return $ testCase ("Dalf imports (withArchiveChoice=" <> show withArchiveChoice <> ")") $ withTempDir $ \projDir -> do
         let genSimpleDalfExe
               | isWindows = "generate-simple-dalf.exe"
               | otherwise = "generate-simple-dalf"
@@ -408,36 +411,63 @@ packagingTests = testGroup "packaging"
           , "version: 0.1.0"
           , "source: ."
           , "dependencies: [daml-prim, daml-stdlib, simple-dalf-0.0.0.dalf]"
+          , "build-options:"
+          , "- --generated-src"
           ]
         writeFileUTF8 (projDir </> "A.daml") $ unlines
             [ "daml 1.2"
             , "module A where"
-            , "import qualified \"simple-dalf\" Module"
+            , "import qualified Module"
+            , "import qualified ModuleInstances"
+            , "import DA.Internal.Template (toAnyTemplate, fromAnyTemplate)"
             , "newTemplate : Party -> Party -> Module.Template"
             , "newTemplate p1 p2 = Module.Template with Module.this = p1, Module.arg = p2"
             , "newChoice : Module.Choice"
             , "newChoice = Module.Choice ()"
-            --, "createTemplate : Party -> Party -> Update (ContractId Module.Template)"
-            --, "createTemplate p1 p2 = create $ newTemplate p1 p2"
-            --, "fetchTemplate : ContractId Module.Template -> Update Module.Template"
-            --, "fetchTemplate = fetch"
-            --, "archiveTemplate : ContractId Module.Template -> Update ()"
-            --, "archiveTemplate = archive"
-            --, "signatoriesTemplate : Module.Template -> [Party]"
-            --, "signatoriesTemplate = signatory"
-            --, "observersTemplate : Module.Template -> [Party]"
-            --, "observersTemplate = observer"
-            --, "ensureTemplate : Module.Template -> Bool"
-            --, "ensureTemplate = ensure"
-            --, "agreementTemplate : Module.Template -> Text"
-            --, "agreementTemplate = agreement"
+            , "createTemplate : Party -> Party -> Update (ContractId Module.Template)"
+            , "createTemplate p1 p2 = create $ newTemplate p1 p2"
+            , "fetchTemplate : ContractId Module.Template -> Update Module.Template"
+            , "fetchTemplate = fetch"
+            , "archiveTemplate : ContractId Module.Template -> Update ()"
+            , "archiveTemplate = archive"
+            , "signatoriesTemplate : Module.Template -> [Party]"
+            , "signatoriesTemplate = signatory"
+            , "observersTemplate : Module.Template -> [Party]"
+            , "observersTemplate = observer"
+            , "ensureTemplate : Module.Template -> Bool"
+            , "ensureTemplate = ensure"
+            , "agreementTemplate : Module.Template -> Text"
+            , "agreementTemplate = agreement"
+            , "toAnyTemplateTemplate : Module.Template -> AnyTemplate"
+            , "toAnyTemplateTemplate = toAnyTemplate"
+            , "fromAnyTemplateTemplate : AnyTemplate -> Optional Module.Template"
+            , "fromAnyTemplateTemplate = fromAnyTemplate"
+            , "test_methods = scenario do"
+            , "  alice <- getParty \"Alice\""
+            , "  bob <- getParty \"Bob\""
+            , "  let t = newTemplate alice bob"
+            , "  assert $ signatory t == [alice, bob]"
+            , "  assert $ observer t == []"
+            , "  assert $ ensure t"
+            , "  assert $ agreement t == \"\""
+            , "  coid <- submit alice $ createTemplate alice alice"
+            , "  " <> (if withArchiveChoice then "submit" else "submitMustFail") <> " alice $ archive coid"
+            , "  coid1 <- submit bob $ createTemplate bob bob"
+            , "  t1 <- submit bob $ fetch coid1"
+            , "  assert $ signatory t1 == [bob, bob]"
+            , "  let anyTemplate = toAnyTemplate t1"
+            , "  let (Some t2 : Optional Module.Template) = fromAnyTemplate anyTemplate"
+            , "  pure ()"
             ]
-        withCurrentDirectory projDir $ callCommandQuiet $ genSimpleDalf <> " simple-dalf-0.0.0.dalf"
-        withCurrentDirectory projDir $ callCommandQuiet "daml build"
+        withCurrentDirectory projDir $ callCommandQuiet $ genSimpleDalf
+            <> (if withArchiveChoice then " --with-archive-choice" else "")
+            <> " simple-dalf-0.0.0.dalf"
+        withCurrentDirectory projDir $ callCommandQuiet "daml build --target 1.dev"
         let dar = projDir </> ".daml/dist/proj-0.1.0.dar"
         assertBool "proj-0.1.0.dar was not created." =<< doesFileExist dar
+        withCurrentDirectory projDir $ callCommandQuiet "daml test --target 1.dev"
 
-    , testCaseSteps "Build migration package" $ \step -> withTempDir $ \tmpDir -> do
+    <> [ testCaseSteps "Build migration package" $ \step -> withTempDir $ \tmpDir -> do
         -- it's important that we have fresh empty directories here!
         let projectA = tmpDir </> "a-1.0"
         let projectB = tmpDir </> "a-2.0"
@@ -448,6 +478,92 @@ packagingTests = testGroup "packaging"
         let upgradeDar = projectUpgrade </> distDir </> "upgrade-0.0.1.dar"
         let rollbackDar= projectRollback </> distDir </> "rollback-0.0.1.dar"
         let bWithUpgradesDar = "a-2.0-with-upgrades.dar"
+        step "Creating project a-1.0 ..."
+        createDirectoryIfMissing True (projectA </> "daml")
+        writeFileUTF8 (projectA </> "daml" </> "Main.daml") $ unlines
+            [ "{-# LANGUAGE EmptyCase #-}"
+            , "daml 1.2"
+            , "module Main where"
+            , "data OnlyA"
+            , "data Both"
+            , "template Foo"
+            , "  with"
+            , "    a : Int"
+            , "    p : Party"
+            , "  where"
+            , "    signatory p"
+            ]
+        writeFileUTF8 (projectA </> "daml.yaml") $ unlines
+            [ "sdk-version: " <> sdkVersion
+            , "name: a"
+            , "version: \"1.0\""
+            , "source: daml"
+            , "exposed-modules: [Main]"
+            , "dependencies:"
+            , "  - daml-prim"
+            , "  - daml-stdlib"
+            ]
+        -- We use -o to test that we do not depend on the name of the dar
+        withCurrentDirectory projectA $ callCommandQuiet $ "daml build -o " <> aDar
+        assertBool "a-1.0.dar was not created." =<< doesFileExist aDar
+        step "Creating project a-2.0 ..."
+        createDirectoryIfMissing True (projectB </> "daml")
+        writeFileUTF8 (projectB </> "daml" </> "Main.daml") $ unlines
+            [ "daml 1.2"
+            , "module Main where"
+            , "data OnlyB"
+            , "data Both"
+            , "template Foo"
+            , "  with"
+            , "    a : Int"
+            , "    p : Party"
+            -- , "    new : Optional Text"
+            , "  where"
+            , "    signatory p"
+            ]
+        writeFileUTF8 (projectB </> "daml.yaml") $ unlines
+            [ "sdk-version: " <> sdkVersion
+            , "name: a"
+            , "version: \"2.0\""
+            , "source: daml"
+            , "exposed-modules: [Main]"
+            , "dependencies:"
+            , "  - daml-prim"
+            , "  - daml-stdlib"
+            ]
+        -- We use -o to test that we do not depend on the name of the dar
+        withCurrentDirectory projectB $ callCommandQuiet $ "daml build -o " <> bDar
+        assertBool "a-2.0.dar was not created." =<< doesFileExist bDar
+        step "Creating upgrade/rollback project"
+        -- We use -o to verify that we do not depend on the
+        callCommandQuiet $ unwords ["daml", "migrate", projectUpgrade, aDar, bDar]
+        callCommandQuiet $ unwords ["daml", "migrate", projectRollback, bDar, aDar]
+        step "Build migration project"
+        withCurrentDirectory projectUpgrade $
+            callCommandQuiet "daml build"
+        assertBool "upgrade-0.0.1.dar was not created" =<< doesFileExist upgradeDar
+        step "Build rollback project"
+        withCurrentDirectory projectRollback $
+            callCommandQuiet "daml build"
+        assertBool "rollback-0.0.1.dar was not created" =<< doesFileExist rollbackDar
+        step "Merging upgrade dar"
+        callCommandQuiet $
+          unwords
+              [ "daml damlc merge-dars"
+              , bDar
+              , upgradeDar
+              , "--dar-name"
+              , bWithUpgradesDar
+              ]
+        assertBool "a-0.2-with-upgrades.dar was not created." =<< doesFileExist bWithUpgradesDar
+      , testCaseSteps "Build migration package with generics" $ \step -> withTempDir $ \tmpDir -> do
+        -- it's important that we have fresh empty directories here!
+        let projectA = tmpDir </> "a-1.0"
+        let projectB = tmpDir </> "a-2.0"
+        let projectUpgrade = tmpDir </> "upgrade"
+        let aDar = projectA </> "projecta.dar"
+        let bDar = projectB </> "projectb.dar"
+        let upgradeDar = projectUpgrade </> distDir </> "upgrade-0.0.1.dar"
         step "Creating project a-1.0 ..."
         createDirectoryIfMissing True (projectA </> "daml")
         writeFileUTF8 (projectA </> "daml" </> "Main.daml") $ unlines
@@ -507,26 +623,47 @@ packagingTests = testGroup "packaging"
         step "Creating upgrade/rollback project"
         -- We use -o to verify that we do not depend on the
         callCommandQuiet $ unwords ["daml", "migrate", projectUpgrade, aDar, bDar]
-        callCommandQuiet $ unwords ["daml", "migrate", projectRollback, bDar, aDar]
+        step "Generate generic instances"
+        writeFileUTF8 (projectUpgrade </> "daml" </> "Main.daml") $ unlines
+           [ "daml 1.2"
+           , "module Main where"
+           , "import MainA qualified as A"
+           , "import MainB qualified as B"
+           , "import MainAGenInstances qualified as A"
+           , "import MainBGenInstances qualified as B"
+           , "import DA.Upgrade"
+           , "import DA.Generics"
+           , "template instance FooUpgrade = Upgrade A.Foo B.Foo"
+           , "template instance FooRollback = Rollback A.Foo B.Foo"
+           , "instance Convertible A.Foo B.Foo"
+           , "instance Convertible B.Foo A.Foo"
+           ]
+        callCommandQuiet $
+            unwords
+                [ "daml"
+                , "damlc"
+                , "generate-gen-src"
+                , "--srcdir"
+                , projectUpgrade </> "daml"
+                , "--qualify"
+                , "A"
+                , aDar
+                ]
+        callCommandQuiet $
+            unwords
+                [ "daml"
+                , "damlc"
+                , "generate-gen-src"
+                , "--srcdir"
+                , projectUpgrade </> "daml"
+                , "--qualify"
+                , "B"
+                , bDar
+                ]
         step "Build migration project"
         withCurrentDirectory projectUpgrade $
-            callCommandQuiet "daml build"
+            callCommandQuiet "daml build --generated-src"
         assertBool "upgrade-0.0.1.dar was not created" =<< doesFileExist upgradeDar
-        step "Build rollback project"
-        withCurrentDirectory projectRollback $
-            callCommandQuiet "daml build"
-        assertBool "rollback-0.0.1.dar was not created" =<< doesFileExist rollbackDar
-        step "Merging upgrade dar"
-        callCommandQuiet $
-          unwords
-              [ "daml damlc merge-dars"
-              , bDar
-              , upgradeDar
-              , "--dar-name"
-              , bWithUpgradesDar
-              ]
-        assertBool "a-0.2-with-upgrades.dar was not created." =<< doesFileExist bWithUpgradesDar
-
 
     , testCaseSteps "Build migration package in LF 1.dev with Numerics" $ \step -> withTempDir $ \tmpDir -> do
         -- it's important that we have fresh empty directories here!
@@ -542,8 +679,7 @@ packagingTests = testGroup "packaging"
         step "Creating project a-1.0 ..."
         createDirectoryIfMissing True (projectA </> "daml")
         writeFileUTF8 (projectA </> "daml" </> "Main.daml") $ unlines
-            [ "{-# LANGUAGE EmptyCase #-}"
-            , "daml 1.2"
+            [ "daml 1.2"
             , "module Main where"
             , "data OnlyA"
             , "data Both"
@@ -578,7 +714,7 @@ packagingTests = testGroup "packaging"
             , "  with"
             , "    a : Numeric 5"
             , "    p : Party"
-            , "    new : Optional Text"
+            -- , "    new : Optional Text"
             , "  where"
             , "    signatory p"
             ]
@@ -617,7 +753,7 @@ packagingTests = testGroup "packaging"
               , bWithUpgradesDar
               ]
         assertBool "a-0.2-with-upgrades.dar was not created." =<< doesFileExist bWithUpgradesDar
-    ]
+    ])
 
 quickstartTests :: FilePath -> FilePath -> TestTree
 quickstartTests quickstartDir mvnDir = testGroup "quickstart"
