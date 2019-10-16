@@ -1,0 +1,41 @@
+daml 1.2
+module ScriptTest where
+
+import Prelude hiding (getParty)
+
+import Daml.Script
+
+template T
+  with
+    p1 : Party
+    p2 : Party
+  where
+    signatory p1, p2
+
+template TProposal
+  with
+    p1 : Party
+    p2 : Party
+  where
+    signatory p1
+    observer p2
+    choice Accept : (ContractId T, Int)
+      controller p2
+      do cid <- create T { p1, p2 }
+         pure (cid, 42)
+
+template C
+  with
+    p : Party
+    v : Int
+  where
+    signatory p
+
+main : Script ()
+main = do
+  alice <- getParty "alice"
+  bob <- getParty "bob"
+  cId1 <- createCmd alice (TProposal alice bob)
+  (cId2, r) <- exerciseCmd bob cId1 Accept
+  _ <- createCmd alice (C alice r)
+  pure ()

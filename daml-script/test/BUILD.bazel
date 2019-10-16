@@ -1,0 +1,29 @@
+genrule(
+    name = "script-test",
+    srcs =
+        glob(["**/*.daml"]) + [
+            "//daml-script/daml:daml-script.dar",
+        ],
+    outs = ["script-test.dar"],
+    cmd = """
+      set -eou pipefail
+      TMP_DIR=$$(mktemp -d)
+      mkdir -p $$TMP_DIR/daml
+      cp -L $(location :daml/ScriptTest.daml) $$TMP_DIR/daml
+      cp -L $(location //daml-script/daml:daml-script.dar) $$TMP_DIR/
+      cat << EOF > $$TMP_DIR/daml.yaml
+sdk-version: 0.0.0
+name: script-test
+source: daml
+version: 0.0.1
+dependencies:
+  - daml-stdlib
+  - daml-prim
+  - daml-script.dar
+EOF
+      $(location //compiler/damlc) build --target=1.dev --project-root=$$TMP_DIR -o $$PWD/$(location script-test.dar)
+      rm -rf $$TMP_DIR
+    """,
+    tools = ["//compiler/damlc"],
+    visibility = ["//visibility:public"],
+)
