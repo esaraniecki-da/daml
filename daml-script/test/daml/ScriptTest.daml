@@ -1,7 +1,7 @@
 daml 1.2
 module ScriptTest where
 
-import Prelude hiding (getParty)
+import Prelude hiding (getParty, submit)
 
 import Daml.Script
 
@@ -35,7 +35,7 @@ main : Script ()
 main = do
   alice <- getParty "alice"
   bob <- getParty "bob"
-  cId1 <- createCmd alice (TProposal alice bob)
-  (cId2, r) <- exerciseCmd bob cId1 Accept
-  _ <- createCmd alice (C alice r)
+  (cId1, _) <- submit' alice $ (,) <$> createCmd (TProposal alice bob) <*> createCmd (TProposal alice bob)
+  (cId2, r) <- submit' bob $ exerciseCmd cId1 Accept
+  _ <- submit' alice $ createCmd (C alice r)
   pure ()

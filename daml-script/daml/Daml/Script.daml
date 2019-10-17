@@ -21,10 +21,32 @@ instance Functor f => Action (Free f) where
   Pure a >>= f = f a
   Free x >>= f = Free ((>>= f) <$> x)
 
-data ScriptF a
-  = Create { party : Party, argC : AnyTemplate, continueC : ContractId () -> a }
-  | Exercise { party : Party, tplId : TemplateTypeRep, cId : ContractId (), argE : AnyChoice, continueE : LedgerValue -> a }
+data Ap f a
+  = PureA a
+  | Ap (forall r. (forall b. f b -> Ap f (b -> a) -> r) -> r)
+
+instance Functor (Ap f) where
+  fmap f (PureA x) = PureA (f x)
+  fmap f (Ap c) = Ap (\c' -> c (\a b -> c' a (fmap (f .) b)))
+
+instance Applicative (Ap f) where
+  pure = PureA
+  PureA f <*> x = fmap f x
+  Ap c <*> x = Ap (\c' -> c (\a b -> c' a (flip <$> b <*> x)))
+
+data CommandsF a
+  = Create { argC : AnyTemplate, continueC : ContractId () -> a }
+  | Exercise { tplId : TemplateTypeRep, cId : ContractId (), argE : AnyChoice, continueE : LedgerValue -> a }
   deriving Functor
+
+type Commands = Ap CommandsF
+
+data ScriptF a
+  = Submit { party : Party, commands : Commands a }
+  deriving Functor
+
+submit' : Party -> Commands a -> Script a
+submit' p cmds = Free (fmap pure $ Submit p cmds)
 
 type Script = Free ScriptF
 
@@ -33,11 +55,11 @@ data LedgerValue = LedgerValue {}
 fromLedgerValue : LedgerValue -> a
 fromLedgerValue = error "foobar"
 
-createCmd : Template t => Party -> t -> Script (ContractId t)
-createCmd party arg = Free (Create party (toAnyTemplate arg) (pure . coerceContractId))
+createCmd : Template t => t -> Commands (ContractId t)
+createCmd arg = Ap (\f -> f (Create (toAnyTemplate arg) identity) (pure coerceContractId))
 
-exerciseCmd : forall t c r. Choice t c r => Party -> ContractId t -> c -> Script r
-exerciseCmd party cId arg = Free (Exercise party (templateTypeRep @t) (coerceContractId cId) (toAnyChoice @t arg) (pure . fromLedgerValue))
+exerciseCmd : forall t c r. Choice t c r => ContractId t -> c -> Commands r
+exerciseCmd cId arg = Ap (\f -> f (Exercise (templateTypeRep @t) (coerceContractId cId) (toAnyChoice @t arg) identity) (pure fromLedgerValue))
 
 getParty : Text -> Script Party
 getParty = pure . fromSome . partyFromText
