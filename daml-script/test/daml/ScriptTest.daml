@@ -35,7 +35,7 @@ main : Script ()
 main = do
   alice <- getParty "alice"
   bob <- getParty "bob"
-  (cId1, _) <- submit' alice $ (,) <$> createCmd (TProposal alice bob) <*> createCmd (TProposal alice bob)
-  (cId2, r) <- submit' bob $ exerciseCmd cId1 Accept
+  (cId1, cId2) <- submit' alice $ (,) <$> createCmd (TProposal alice bob) <*> createCmd (TProposal alice bob)
+  (cId2, r) <- submit' bob $ const <$> exerciseCmd cId1 Accept <*> exerciseCmd cId2 Accept
   _ <- submit' alice $ createCmd (C alice r)
   pure ()

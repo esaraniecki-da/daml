@@ -42,11 +42,14 @@ data CommandsF a
 type Commands = Ap CommandsF
 
 data ScriptF a
-  = Submit { party : Party, commands : Commands a }
+  = Submit (SubmitCmd a)
+  deriving Functor
+
+data SubmitCmd a = SubmitCmd { party : Party, commands : Commands a }
   deriving Functor
 
 submit' : Party -> Commands a -> Script a
-submit' p cmds = Free (fmap pure $ Submit p cmds)
+submit' p cmds = Free (fmap pure $ Submit $ SubmitCmd p cmds)
 
 type Script = Free ScriptF
 

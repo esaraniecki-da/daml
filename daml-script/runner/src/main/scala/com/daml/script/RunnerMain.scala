@@ -14,12 +14,14 @@ import scala.concurrent.duration.Duration
 import scalaz.syntax.traverse._
 
 import com.digitalasset.ledger.api.validation.ValueValidator
+import com.digitalasset.ledger.api.v1.transaction.TreeEvent
 import com.digitalasset.daml.lf.archive.{Dar, DarReader}
 import com.digitalasset.daml.lf.archive.Decode
-import com.digitalasset.daml.lf.data.Ref.{DottedName, Identifier, Name, PackageId, QualifiedName, ContractIdString}
+import com.digitalasset.daml.lf.data.Ref.{ContractIdString, DottedName, Identifier, Name, PackageId, QualifiedName}
 import com.digitalasset.daml.lf.language.Ast.Package
 import com.digitalasset.daml_lf_dev.DamlLf
 import com.digitalasset.grpc.adapter.AkkaExecutionSequencerPool
+import com.digitalasset.ledger.api.domain.LedgerId
 import com.digitalasset.ledger.api.refinements.ApiTypes.ApplicationId
 import com.digitalasset.ledger.client.LedgerClient
 import com.digitalasset.ledger.client.configuration.{
@@ -31,15 +33,15 @@ import com.digitalasset.ledger.client.configuration.{
 import com.digitalasset.daml.lf.language.Ast._
 import com.digitalasset.daml.lf.PureCompiledPackages
 import com.digitalasset.daml.lf.speedy.Compiler
-import com.digitalasset.daml.lf.speedy.{Speedy, SValue}
+import com.digitalasset.daml.lf.speedy.{Speedy, SValue, SExpr}
 import com.digitalasset.daml.lf.speedy.SExpr._
 import com.digitalasset.daml.lf.speedy.SResult._
 import com.digitalasset.daml.lf.speedy.SValue._
+import com.digitalasset.daml.lf.speedy.SBuiltin._
 
-import com.digitalasset.ledger.api.v1.event._
 import com.digitalasset.ledger.api.v1.value.{Identifier => ApiIdentifier}
 import com.digitalasset.ledger.api.v1.command_service.SubmitAndWaitRequest
-import com.digitalasset.ledger.api.v1.commands.{Command, Commands, CreateCommand, ExerciseCommand}
+import com.digitalasset.ledger.api.v1.commands._
 
 import com.digitalasset.api.util.TimestampConversion.fromInstant
 import com.digitalasset.platform.participant.util.LfEngineToApi.{
@@ -133,6 +135,119 @@ object RunnerMain {
           )
         }
 
+        def getApFields(fun : SValue) : (SVariant, SVariant) = {
+          val extractTuple = SEMakeClo(Array(), 2, SEApp(SEBuiltin(SBTupleCon(Name.Array(Name.assertFromString("a"), Name.assertFromString("b")))), Array(SEVar(2), SEVar(1))))
+          val machine = Speedy.Machine.fromSExpr(SEApp(SEValue(fun), Array(extractTuple)), false, compiledPackages)
+          while (!machine.isFinal) {
+            machine.step() match {
+              case SResultContinue => ()
+              case res => {
+                throw new RuntimeException(s"Unexpected speedy result $res")
+              }
+            }
+          }
+          val tuple = machine.toSValue.asInstanceOf[STuple]
+          (tuple.values.get(0).asInstanceOf[SVariant], tuple.values.get(1).asInstanceOf[SVariant])
+        }
+
+        def toCreateCommand(v : SRecord) : Command = {
+          val anyTemplate = v.values.get(0).asInstanceOf[SRecord].values.get(0).asInstanceOf[SAny]
+          val templateTy = anyTemplate.ty.asInstanceOf[TTyCon].tycon
+          val templateArg = anyTemplate.value
+          Command().withCreate(
+            CreateCommand(
+              Some(toApiIdentifier(templateTy)),
+              Some(toLedgerRecord(templateArg).right.get)))
+        }
+
+        def toExerciseCommand(v : SRecord) : Command = {
+          val tId = v.values.get(0).asInstanceOf[SRecord].values.get(0).asInstanceOf[SText].value
+          val packageId = tId.split('(')(1).split(',')(0)
+          val moduleId = tId.split(',')(1).split(')')(0).split(':')(0)
+          val entityId = tId.split(',')(1).split(')')(0).split(':')(1)
+          val tplId = ApiIdentifier(packageId, moduleId, entityId)
+          val cId = v.values.get(1).asInstanceOf[SContractId].value.asInstanceOf[AbsoluteContractId].coid
+          val anyChoice = v.values.get(2).asInstanceOf[SRecord].values.get(0).asInstanceOf[SAny]
+          val anyChoiceVal = anyChoice.value
+          val choiceName = anyChoiceVal.asInstanceOf[SRecord].id.qualifiedName.name.toString
+          Command().withExercise(
+            ExerciseCommand(
+              Some(tplId),
+              cId,
+              choiceName,
+              Some(toLedgerValue(anyChoiceVal).right.get)))
+        }
+
+        def toSubmitRequest(ledgerId: LedgerId, party: SParty, cmds: Seq[Command]) = {
+          val commands = Commands(
+            party = party.value,
+            commands = cmds,
+            ledgerId = ledgerId.unwrap,
+            applicationId = applicationId.unwrap,
+            commandId = UUID.randomUUID.toString,
+            ledgerEffectiveTime = Some(fromInstant(Instant.EPOCH)),
+            maximumRecordTime = Some(fromInstant(Instant.EPOCH.plusSeconds(5)))
+          )
+          SubmitAndWaitRequest(Some(commands))
+        }
+
+        def getCommands(initialFreeAp: SVariant) : Seq[Command] = {
+          var end = false
+          var commands = Seq[Command]()
+          val pure = Name.assertFromString("PureA")
+          val ap = Name.assertFromString("Ap")
+          var freeAp = initialFreeAp
+          do {
+            freeAp.variant match {
+              case `pure` => {
+                end = true
+              }
+              case `ap` => {
+                val (fa, apfba) = getApFields(freeAp.value)
+                fa.variant match {
+                  case "Create" =>
+                    commands ++= Seq(toCreateCommand(fa.value.asInstanceOf[SRecord]))
+                  case "Exercise" =>
+                    commands ++= Seq(toExerciseCommand(fa.value.asInstanceOf[SRecord]))
+                  case _ => throw new RuntimeException("Unknown command: ${fa.variant}")
+                }
+                freeAp = apfba
+              }
+            }
+          } while (!end)
+          commands
+        }
+
+        def fillCommandResults(freeAp: SVariant, eventResults: Seq[TreeEvent]) : SExpr = {
+          val pure = Name.assertFromString("PureA")
+          val ap = Name.assertFromString("Ap")
+          freeAp.variant match {
+            case `pure` => SEValue(freeAp.value)
+            case `ap` => {
+              val (fa, apfba) = getApFields(freeAp.value)
+              val bValue = fa.variant match {
+                case "Create" => {
+                  val continue = fa.value.asInstanceOf[SRecord].values.get(1)
+                  val contractIdString = eventResults.head.getCreated.contractId
+                  val contractId =
+                    SContractId(AbsoluteContractId(ContractIdString.assertFromString(contractIdString)))
+                  SEApp(SEValue(continue), Array(SEValue(contractId)))
+                }
+                case "Exercise" => {
+                  val continue = fa.value.asInstanceOf[SRecord].values.get(3)
+                  val apiExerciseResult = eventResults.head.getExercised.getExerciseResult
+                  val exerciseResult =
+                    SValue.fromValue(ValueValidator.validateValue(apiExerciseResult).right.get)
+                  SEApp(SEValue(continue), Array(SEValue(exerciseResult)))
+                }
+                case _ => throw new RuntimeException("Unknown command: ${fa.variant}")
+              }
+              val fValue = fillCommandResults(apfba, eventResults.tail)
+              SEApp(fValue, Array(bValue))
+            }
+
+          }
+        }
 
         def run(client: LedgerClient) = {
           val scriptExpr = EVal(scriptId)
@@ -155,75 +270,33 @@ object RunnerMain {
                 if (constr.equals(Name.assertFromString("Free"))) {
                   v match {
                     case SVariant(_, constr, v) => {
-                      if (constr == Name.assertFromString("Create")) {
+                      if (constr == Name.assertFromString("Submit")) {
                         v match {
                           case SRecord(_, _, vals) => {
-                            assert(vals.size == 3)
-                            val party = vals.get(0).asInstanceOf[SParty].value
-                            val anyTemplate = vals.get(1).asInstanceOf[SRecord].values.get(0).asInstanceOf[SAny]
-                            val templateTy = anyTemplate.ty.asInstanceOf[TTyCon].tycon
-                            val templateArg = anyTemplate.value
-                            val continue = vals.get(2)
-                            val command = Command().withCreate(CreateCommand(Some(toApiIdentifier(templateTy)), Some(toLedgerRecord(templateArg).right.get)))
-                            val commands = Commands(
-                              ledgerId = client.ledgerId.unwrap,
-                              applicationId = ApplicationId.unwrap(applicationId),
-                              commandId = UUID.randomUUID.toString,
-                              ledgerEffectiveTime = Some(fromInstant(Instant.EPOCH)),
-                              maximumRecordTime = Some(fromInstant(Instant.EPOCH.plusSeconds(5))),
-                              party = party,
-                              commands = Seq(command)
-                            )
-                            val f = client.commandServiceClient.submitAndWaitForTransaction(SubmitAndWaitRequest(commands = Some(commands)))
-                            val transaction = Await.result(f, Duration.Inf).getTransaction
-                            val contractId = transaction.events(0).getCreated.asInstanceOf[CreatedEvent].contractId
-                            machine.ctrl = Speedy.CtrlExpr(SEApp(SEValue(continue), Array(SEValue(SContractId(AbsoluteContractId(ContractIdString.assertFromString(contractId)))))))
-                          }
-                          case _ => throw new RuntimeException(s"Expected record but got $v")
-                        }
-                      } else if (constr == Name.assertFromString("Exercise")) {
-                        v match {
-                          case SRecord(_, _, vals) => {
-                            assert(vals.size == 5)
-                            val party = vals.get(0).asInstanceOf[SParty].value
-                            val tId = vals.get(1).asInstanceOf[SRecord].values.get(0).asInstanceOf[SText].value
-                            val packageId = tId.split('(')(1).split(',')(0)
-                            val moduleId = tId.split(',')(1).split(')')(0).split(':')(0)
-                            val entityId = tId.split(',')(1).split(')')(0).split(':')(1)
-                            val tplId = ApiIdentifier(packageId, moduleId, entityId)
-                            val cId = vals.get(2).asInstanceOf[SContractId].value.asInstanceOf[AbsoluteContractId].coid
-                            val anyChoice = vals.get(3).asInstanceOf[SRecord].values.get(0).asInstanceOf[SAny]
-                            val anyChoiceVal = anyChoice.value
-                            val valChoiceName = anyChoiceVal.asInstanceOf[SRecord].id.qualifiedName.name.toString
-                            val continue = vals.get(4)
-                            val command = Command().withExercise(ExerciseCommand(Some(tplId), cId, valChoiceName, Some(toLedgerValue(anyChoiceVal).right.get)))
-                            val commands = Commands(
-                              ledgerId = client.ledgerId.unwrap,
-                              applicationId = ApplicationId.unwrap(applicationId),
-                              commandId = UUID.randomUUID.toString,
-                              ledgerEffectiveTime = Some(fromInstant(Instant.EPOCH)),
-                              maximumRecordTime = Some(fromInstant(Instant.EPOCH.plusSeconds(5))),
-                              party = party,
-                              commands = Seq(command)
-                            )
-                            val f = client.commandServiceClient.submitAndWaitForTransactionTree(SubmitAndWaitRequest(commands = Some(commands)))
+                            assert(vals.size == 2)
+                            val party = vals.get(0).asInstanceOf[SParty]
+                            val freeAp = vals.get(1).asInstanceOf[SVariant]
+                            val commands = getCommands(freeAp)
+                            val request = toSubmitRequest(client.ledgerId, party, commands)
+                            val f = client.commandServiceClient.submitAndWaitForTransactionTree(request)
                             val transactionTree = Await.result(f, Duration.Inf).getTransaction
-                            val exerciseResult = transactionTree.eventsById(transactionTree.rootEventIds(0)).getExercised.getExerciseResult
-                            val exerciseVal = SValue.fromValue(ValueValidator.validateValue(exerciseResult).right.get)
-                            machine.ctrl = Speedy.CtrlExpr(SEApp(SEValue(continue), Array(SEValue(exerciseVal))))
+                            val events =
+                              transactionTree.rootEventIds.map(evId => transactionTree.eventsById(evId))
+                            val filled = fillCommandResults(freeAp, events)
+                            machine.ctrl = Speedy.CtrlExpr(filled)
                           }
-                          case _ => throw new RuntimeException(s"Expected record but got $v")
+                          case _ => throw new RuntimeException(s"Expected record but")
                         }
                       } else {
                         throw new RuntimeException(s"Unknown constructor: $constr")
                       }
                     }
-                    case _ => throw new RuntimeException(s"Expected variant but got $v")
+                    case _ => throw new RuntimeException(s"Expected variant")
                   }
                 } else {
                   end = true
                 }
-              case v => throw new RuntimeException(s"Expected variant but got $v")
+              case v => throw new RuntimeException(s"Expected variant")
             }
           }
         }
