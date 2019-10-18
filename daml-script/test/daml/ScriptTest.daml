@@ -1,3 +1,4 @@
+{-# LANGUAGE ApplicativeDo #-}
 daml 1.2
 module ScriptTest where
 
@@ -35,7 +36,13 @@ main : Script ()
 main = do
   alice <- getParty "alice"
   bob <- getParty "bob"
-  (cId1, cId2) <- submit' alice $ (,) <$> createCmd (TProposal alice bob) <*> createCmd (TProposal alice bob)
-  (cId2, r) <- submit' bob $ const <$> exerciseCmd cId1 Accept <*> exerciseCmd cId2 Accept
-  _ <- submit' alice $ createCmd (C alice r)
+  (cId1, cId2) <- submit alice $ do
+    cid1 <- createCmd (TProposal alice bob)
+    cid2 <- createCmd (TProposal alice bob)
+    pure (cid1, cid2)
+  r <- submit bob $ do
+    ~(_, r) <- exerciseCmd cId1 Accept
+    exerciseCmd cId2 Accept
+    pure r
+  _ <- submit alice $ createCmd (C alice r)
   pure ()
