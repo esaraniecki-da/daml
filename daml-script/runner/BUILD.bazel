@@ -27,6 +27,7 @@ da_scala_library(
         "//language-support/scala/bindings-akka",
         "//ledger-api/rs-grpc-bridge",
         "//ledger/ledger-api-common",
+        "//ledger/ledger-api-client",
     ],
 )
 

@@ -34,8 +34,8 @@ template C
 
 main : Script ()
 main = do
-  alice <- getParty "alice"
-  bob <- getParty "bob"
+  alice <- allocateParty "alice"
+  bob <- allocateParty "bob"
   (cId1, cId2) <- submit alice $ do
     cid1 <- createCmd (TProposal alice bob)
     cid2 <- createCmd (TProposal alice bob)

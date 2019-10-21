@@ -44,6 +44,7 @@ type Commands = Ap CommandsF
 data ScriptF a
   = Submit (SubmitCmd a)
   | Query (QueryACS a)
+  | AllocParty (AllocateParty a)
   deriving Functor
 
 data QueryACS a = QueryACS
@@ -54,6 +55,14 @@ data QueryACS a = QueryACS
 
 query : forall t. Template t => Party -> Script [t]
 query p = Free $ Query (QueryACS p (templateTypeRep @t) (pure . map (fromSome . fromAnyTemplate)))
+
+data AllocateParty a = AllocateParty
+  { displayName : Text
+  , continue : Party -> a
+  } deriving Functor
+
+allocateParty : Text -> Script Party
+allocateParty displayName = Free (AllocParty $ AllocateParty displayName pure)
 
 data SubmitCmd a = SubmitCmd { party : Party, commands : Commands a }
   deriving Functor
@@ -73,6 +82,3 @@ createCmd arg = Ap (\f -> f (Create (toAnyTemplate arg) identity) (pure coerceCo
 
 exerciseCmd : forall t c r. Choice t c r => ContractId t -> c -> Commands r
 exerciseCmd cId arg = Ap (\f -> f (Exercise (templateTypeRep @t) (coerceContractId cId) (toAnyChoice @t arg) identity) (pure fromLedgerValue))
-
-getParty : Text -> Script Party
-getParty = pure . fromSome . partyFromText

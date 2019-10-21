@@ -13,6 +13,8 @@ import scalaz.syntax.tag._
 
 import java.util.UUID
 
+import com.digitalasset.ledger.client.services.admin.PartyManagementClient
+import com.digitalasset.ledger.api.v1.admin.party_management_service.PartyManagementServiceGrpc
 import com.digitalasset.ledger.api.v1.event.{CreatedEvent}
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration.Duration
@@ -59,6 +61,8 @@ import com.digitalasset.platform.participant.util.LfEngineToApi.{
 }
 
 import com.digitalasset.daml.lf.value.Value.{AbsoluteContractId, RelativeContractId}
+
+import io.grpc.Channel
 
 object RunnerMain {
 
@@ -262,7 +266,8 @@ object RunnerMain {
           }
         }
 
-        def run(client: LedgerClient) = {
+        def run(channel : Channel, client: LedgerClient) = {
+          val partyClient = new PartyManagementClient(PartyManagementServiceGrpc.stub(channel))
           val scriptExpr = EVal(scriptId)
           val machine = Speedy.Machine.fromSExpr(compiler.compile(scriptExpr), false, compiledPackages)
           var end = false
@@ -341,6 +346,18 @@ object RunnerMain {
                           }
                           case _ => throw new RuntimeException(s"Expected record but got $v")
                         }
+                      } else if (constr == Name.assertFromString("AllocParty")) {
+                        v match {
+                          case SRecord(_, _, vals) => {
+                            assert(vals.size == 2)
+                            val displayName = vals.get(0).asInstanceOf[SText].value
+                            val f = partyClient.allocateParty(None, Some(displayName))
+                            val party = Await.result(f, Duration.Inf).party
+                            val continue = vals.get(1)
+                            machine.ctrl = Speedy.CtrlExpr(SEApp(SEValue(continue), Array(SEValue(SParty(party)))))
+                          }
+                          case _ => throw new RuntimeException(s"Expected record but got $v")
+                        }
                       } else {
                         throw new RuntimeException(s"Unknown constructor: $constr")
                       }
@@ -354,12 +371,10 @@ object RunnerMain {
             }
           }
         }
-
+        val channel = LedgerClient.constructChannel(config.ledgerHost, config.ledgerPort, clientConfig)
         val flow: Future[Unit] = for {
-          client <- LedgerClient.singleHost(config.ledgerHost, config.ledgerPort, clientConfig)(
-            ec,
-            sequencer)
-          _ = run(client)
+          client <- LedgerClient.forChannel(clientConfig, channel)(ec, sequencer)
+          _ = run(channel, client)
         } yield ()
 
         flow.onComplete(_ => system.terminate())
