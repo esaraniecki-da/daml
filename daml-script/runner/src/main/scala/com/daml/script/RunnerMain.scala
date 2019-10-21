@@ -3,12 +3,17 @@
 
 package com.daml.script
 
+import java.util
+import scala.collection.JavaConverters._
 import java.time.Instant
 import akka.actor.ActorSystem
+import akka.stream.scaladsl._
+import akka.stream._
 import scalaz.syntax.tag._
 
 import java.util.UUID
 
+import com.digitalasset.ledger.api.v1.event.{CreatedEvent}
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration.Duration
 import scalaz.syntax.traverse._
@@ -17,6 +22,7 @@ import com.digitalasset.ledger.api.validation.ValueValidator
 import com.digitalasset.ledger.api.v1.transaction.TreeEvent
 import com.digitalasset.daml.lf.archive.{Dar, DarReader}
 import com.digitalasset.daml.lf.archive.Decode
+import com.digitalasset.daml.lf.data.FrontStack
 import com.digitalasset.daml.lf.data.Ref.{ContractIdString, DottedName, Identifier, Name, PackageId, QualifiedName}
 import com.digitalasset.daml.lf.language.Ast.Package
 import com.digitalasset.daml_lf_dev.DamlLf
@@ -34,6 +40,7 @@ import com.digitalasset.daml.lf.language.Ast._
 import com.digitalasset.daml.lf.PureCompiledPackages
 import com.digitalasset.daml.lf.speedy.Compiler
 import com.digitalasset.daml.lf.speedy.{Speedy, SValue, SExpr}
+import com.digitalasset.daml.lf.speedy.Pretty
 import com.digitalasset.daml.lf.speedy.SExpr._
 import com.digitalasset.daml.lf.speedy.SResult._
 import com.digitalasset.daml.lf.speedy.SValue._
@@ -42,6 +49,7 @@ import com.digitalasset.daml.lf.speedy.SBuiltin._
 import com.digitalasset.ledger.api.v1.value.{Identifier => ApiIdentifier}
 import com.digitalasset.ledger.api.v1.command_service.SubmitAndWaitRequest
 import com.digitalasset.ledger.api.v1.commands._
+import com.digitalasset.ledger.api.v1.transaction_filter.{Filters, TransactionFilter, InclusiveFilters}
 
 import com.digitalasset.api.util.TimestampConversion.fromInstant
 import com.digitalasset.platform.participant.util.LfEngineToApi.{
@@ -96,6 +104,7 @@ object RunnerMain {
         val system: ActorSystem = ActorSystem("ScriptRunner")
         val sequencer = new AkkaExecutionSequencerPool("ScriptRunnerPool")(system)
         implicit val ec: ExecutionContext = system.dispatcher
+        implicit val materializer: ActorMaterializer = ActorMaterializer()(system)
 
         val darMap: Map[PackageId, Package] = dar.all.toMap
         val compiler = Compiler(darMap)
@@ -160,12 +169,16 @@ object RunnerMain {
               Some(toLedgerRecord(templateArg).right.get)))
         }
 
-        def toExerciseCommand(v : SRecord) : Command = {
-          val tId = v.values.get(0).asInstanceOf[SRecord].values.get(0).asInstanceOf[SText].value
+        def toIdentifier(v : SRecord) : ApiIdentifier = {
+          val tId = v.values.get(0).asInstanceOf[SText].value
           val packageId = tId.split('(')(1).split(',')(0)
           val moduleId = tId.split(',')(1).split(')')(0).split(':')(0)
           val entityId = tId.split(',')(1).split(')')(0).split(':')(1)
-          val tplId = ApiIdentifier(packageId, moduleId, entityId)
+          ApiIdentifier(packageId, moduleId, entityId)
+        }
+
+        def toExerciseCommand(v : SRecord) : Command = {
+          val tplId = toIdentifier(v.values.get(0).asInstanceOf[SRecord])
           val cId = v.values.get(1).asInstanceOf[SContractId].value.asInstanceOf[AbsoluteContractId].coid
           val anyChoice = v.values.get(2).asInstanceOf[SRecord].values.get(0).asInstanceOf[SAny]
           val anyChoiceVal = anyChoice.value
@@ -253,6 +266,7 @@ object RunnerMain {
           val scriptExpr = EVal(scriptId)
           val machine = Speedy.Machine.fromSExpr(compiler.compile(scriptExpr), false, compiledPackages)
           var end = false
+          println("Starting DAML script")
           while (!end) {
             while (!machine.isFinal) {
               machine.step() match {
@@ -264,6 +278,10 @@ object RunnerMain {
                   throw new RuntimeException(s"Unexpected speedy result $res")
                 }
               }
+            }
+            machine.traceLog.iterator.foreach {
+              case (msg, optLoc) =>
+                println(s"TRACE ${Pretty.prettyLoc(optLoc).render(80)}: $msg")
             }
             machine.toSValue match {
               case SVariant(_, constr, v) =>
@@ -285,7 +303,43 @@ object RunnerMain {
                             val filled = fillCommandResults(freeAp, events)
                             machine.ctrl = Speedy.CtrlExpr(filled)
                           }
-                          case _ => throw new RuntimeException(s"Expected record but")
+                          case _ => throw new RuntimeException(s"Expected record but got $v")
+                        }
+                      } else if (constr == Name.assertFromString("Query")) {
+                        v match {
+                          case SRecord(_, _, vals) => {
+                            assert(vals.size == 3)
+                            val party = vals.get(0).asInstanceOf[SParty].value
+                            val tplId = toIdentifier(vals.get(1).asInstanceOf[SRecord])
+                            val continue = vals.get(2)
+                            val filter = TransactionFilter(List(
+                              (party, Filters(Some(InclusiveFilters(Seq(tplId)))))).toMap)
+                            val anyTemplateTyCon =
+                              Identifier(
+                                stdlibPackageId,
+                                QualifiedName(
+                                  DottedName.assertFromString("DA.Internal.LF"),
+                                  DottedName.assertFromString("AnyTemplate")))
+                            def record(ty: Identifier, fields: (String, SValue)*): SValue = {
+                              val fieldNames = Name.Array(fields.map({ case (n, _) => Name.assertFromString(n) }): _*)
+                              val args = new util.ArrayList[SValue](fields.map({ case (_, v) => v }).asJava)
+                              SRecord(ty, fieldNames, args)
+                            }
+                            def fromCreated(created: CreatedEvent) = {
+                              val arg = SValue.fromValue(ValueValidator.validateRecord(created.getCreateArguments).right.get)
+                              val tyCon = arg.asInstanceOf[SRecord].id
+                              record(anyTemplateTyCon, ("getAnyTemplate", SAny(TTyCon(tyCon), arg)))
+                            }
+                            val acsResponses = client.activeContractSetClient
+                              .getActiveContracts(filter, verbose = true)
+                              .runWith(Sink.seq)
+                            val res = Await.result(acsResponses, Duration.Inf)
+                              .flatMap(x => x.activeContracts)
+                              .map(fromCreated)
+                            machine.ctrl = Speedy.CtrlExpr(SEApp(SEValue(continue), Array(SEValue(SList(FrontStack(res))))))
+
+                          }
+                          case _ => throw new RuntimeException(s"Expected record but got $v")
                         }
                       } else {
                         throw new RuntimeException(s"Unknown constructor: $constr")

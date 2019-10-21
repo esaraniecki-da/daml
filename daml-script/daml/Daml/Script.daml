@@ -43,7 +43,17 @@ type Commands = Ap CommandsF
 
 data ScriptF a
   = Submit (SubmitCmd a)
+  | Query (QueryACS a)
   deriving Functor
+
+data QueryACS a = QueryACS
+  { party : Party
+  , tplId : TemplateTypeRep
+  , continue : [AnyTemplate] -> a
+  } deriving Functor
+
+query : forall t. Template t => Party -> Script [t]
+query p = Free $ Query (QueryACS p (templateTypeRep @t) (pure . map (fromSome . fromAnyTemplate)))
 
 data SubmitCmd a = SubmitCmd { party : Party, commands : Commands a }
   deriving Functor

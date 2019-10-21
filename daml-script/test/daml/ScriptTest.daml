@@ -45,4 +45,6 @@ main = do
     exerciseCmd cId2 Accept
     pure r
   _ <- submit alice $ createCmd (C alice r)
+  cs <- query @C alice
+  debug $ show cs
   pure ()
