@@ -238,9 +238,9 @@ Version: 1.dev
   * **Drop** support for Decimal type. Use Numeric of scale 10 instead.
 
   * **Add** string interning in external package references.
-    
+
   * **Add** name interning in external package references.
-    
+
   * **Add** existential ``Any`` type and
     ``from_any`` and ``to_any`` functions to convert from/to
     an arbitrary ground type (i.e. a type with no free type variables) to ``Any``.
@@ -548,14 +548,6 @@ Then we can define our kinds, types, and expressions::
        |  'ContractId'                              -- BTyContractId
        |  'Any'                                     -- BTyAny
 
-<<<<<<< HEAD
-=======
-  Type constraints
-    K ::= ε                                         -- ConstraintTrivial
-       |  Eq α, K
-       |  Serial α, K
-
->>>>>>> Add GenMap to DAML-LF 1.dev
   Types (mnemonic: tau for type)
     τ, σ
       ::= α                                         -- TyVar: Type variable
