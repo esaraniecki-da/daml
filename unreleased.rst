@@ -23,3 +23,4 @@ HEAD — ongoing
   templates at ``Numeric n``.
 - [Sandbox] Timing about database operations are now exposed over JMX as well as via the logs.
 - [DAML Triggers] Remove the custom ``AbsoluteContractId`` type in favor of the regular ``ContractId`` type used in DAML templates.
+- [DAML SDK] Display release notes in the IDE when the DAML extension is upgraded.
