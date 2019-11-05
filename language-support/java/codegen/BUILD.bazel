@@ -20,7 +20,7 @@ load(
 )
 load(
     "//daml-lf/language:daml-lf.bzl",
-    "lf_dev_version",
+    "lf_stable_version",
     "lf_stable_version",
 )
 load(
