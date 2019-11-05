@@ -21,7 +21,7 @@ load(
 load(
     "//daml-lf/language:daml-lf.bzl",
     "lf_stable_version",
-    "lf_stable_version",
+    "lf_latest_version",
 )
 load(
     "@com_github_johnynek_bazel_jar_jar//:jar_jar.bzl",
