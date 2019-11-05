@@ -6,15 +6,17 @@ package com.daml.ledger.api.testtool.infrastructure
 import ai.x.diff._
 import com.daml.ledger.api.testtool.infrastructure.LedgerTestSuite.SkipTestException
 import com.daml.ledger.api.testtool.infrastructure.participant.ParticipantTestContext
+import com.digitalasset.grpc.{GrpcException, GrpcStatus}
 import com.digitalasset.ledger.api.v1.event.{ArchivedEvent, CreatedEvent, Event, ExercisedEvent}
 import com.digitalasset.ledger.api.v1.transaction.{Transaction, TransactionTree, TreeEvent}
 import com.digitalasset.ledger.test_stable.Test.AgreementFactory
 import com.digitalasset.ledger.test_stable.Test.AgreementFactory._
-import io.grpc.{Status, StatusException, StatusRuntimeException}
+import io.grpc.Status
 
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.{ExecutionContext, Future}
 import scala.language.higherKinds
+import scala.util.control.NonFatal
 
 private[testtool] object LedgerTestSuite {
 
@@ -45,6 +47,9 @@ private[testtool] abstract class LedgerTestSuite(val session: LedgerSession) {
 
   final def fail(message: => String): Nothing =
     throw new AssertionError(message)
+
+  final def fail(message: => String, cause: Throwable): Nothing =
+    throw new AssertionError(message, cause)
 
   private def events(tree: TransactionTree): Iterator[TreeEvent] =
     tree.eventsById.valuesIterator
@@ -80,22 +85,17 @@ private[testtool] abstract class LedgerTestSuite(val session: LedgerSession) {
         s"$context: two objects are supposed to be equal but they are not")
   }
 
-  final def assertGrpcError(t: Throwable, expectedCode: Status.Code, pattern: String): Unit = {
-
-    val (actualCode, message) = t match {
-      case sre: StatusRuntimeException => (sre.getStatus.getCode, sre.getStatus.getDescription)
-      case se: StatusException => (se.getStatus.getCode, se.getStatus.getDescription)
-      case _ =>
-        throw new AssertionError(
-          "Exception is neither a StatusRuntimeException nor a StatusException")
+  final def assertGrpcError(t: Throwable, expectedCode: Status.Code, pattern: String): Unit =
+    t match {
+      case GrpcException(GrpcStatus(`expectedCode`, Some(msg)), _) if msg.contains(pattern) =>
+        ()
+      case GrpcException(GrpcStatus(`expectedCode`, description), _) =>
+        fail(s"Error message did not contain [$pattern], but was [$description].")
+      case GrpcException(status, _) =>
+        fail(s"Expected code [$expectedCode], but got [${status.getCode}].")
+      case NonFatal(e) =>
+        fail("Exception is neither a StatusRuntimeException nor a StatusException", e)
     }
-    assert(actualCode == expectedCode, s"Expected code [$expectedCode], but got [$actualCode].")
-    // Note: Status.getDescription() is nullable, map missing descriptions to an empty string
-    val nonNullMessage = Option(message).getOrElse("")
-    assert(
-      nonNullMessage.contains(pattern),
-      s"Error message did not contain [$pattern], but was [$nonNullMessage].")
-  }
 
   /**
     * Create a synchronization point between two participants by ensuring that a
