@@ -16,6 +16,8 @@ load(
 load(
     "//daml-lf/language:daml-lf.bzl",
     "lf_stable_version",
+    "lf_latest_version",
+    "lf_dev_version",
 )
 
 da_scala_library(
