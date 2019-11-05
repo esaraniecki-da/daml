@@ -34,6 +34,20 @@ object Cli {
   private val cmdArgParser = new scopt.OptionParser[SandboxConfig]("sandbox") {
     head(s"Sandbox version ${BuildInfo.Version}")
 
+    arg[File]("<archive>...")
+      .optional()
+      .unbounded()
+      .validate(f => Either.cond(checkIfZip(f), (), s"Invalid dar file: ${f.getName}"))
+      .action((f, c) => c.copy(damlPackages = f :: c.damlPackages))
+      .text("DAML archives to load in .dar format. Only DAML-LF v1 Archives are currently supported.")
+
+    opt[File]('d', "archive")
+      .optional()
+      .unbounded()
+      .validate(f => Either.cond(checkIfZip(f), (), s"Invalid dar file: ${f.getName}"))
+      .action((f, c) => c.copy(damlPackages = f :: c.damlPackages))
+      .text("Loads the specified DAR archive in the same way as if specified after the options.")
+
     opt[Int]('p', "port")
       .action((x, c) => c.copy(port = x))
       .text(s"Sandbox service port. Defaults to ${SandboxConfig.DefaultPort}.")
@@ -81,13 +95,6 @@ object Cli {
           "Note that when using --postgres-backend the scenario will be ran only if starting from a fresh database, _not_ when resuming from an existing one. " +
           "Two identifier formats are supported: Module.Name:Entity.Name (preferred) and Module.Name.Entity.Name (deprecated, will print a warning when used)." +
           "Also note that instructing the sandbox to load a scenario will have the side effect of loading _all_ the .dar files provided eagerly (see --eager-package-loading).")
-
-    arg[File]("<archive>...")
-      .optional()
-      .unbounded()
-      .validate(f => Either.cond(checkIfZip(f), (), s"Invalid dar file: ${f.getName}"))
-      .action((f, c) => c.copy(damlPackages = f :: c.damlPackages))
-      .text("DAML archives to load in .dar format. Only DAML-LF v1 Archives are currently supported.")
 
     opt[String]("pem")
       .optional()

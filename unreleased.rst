@@ -23,3 +23,5 @@ HEAD — ongoing
   templates at ``Numeric n``.
 - [Sandbox] Timing about database operations are now exposed over JMX as well as via the logs.
 - [DAML Triggers] Remove the custom ``AbsoluteContractId`` type in favor of the regular ``ContractId`` type used in DAML templates.
+- [Sandbox] New option: ``--archive path/to.dar``, which allows for DAR files
+  to be specified as part of the options rather than after all of them.
